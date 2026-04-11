@@ -1,252 +1,419 @@
 package com.player;
 
+import javafx.animation.AnimationTimer;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.beans.value.ChangeListener;
-import javafx.collections.FXCollections;
-import javafx.collections.ObservableList;
-import javafx.geometry.Insets;
-import javafx.geometry.Pos;
+import javafx.collections.*;
+import javafx.collections.transformation.FilteredList;
+import javafx.geometry.*;
 import javafx.scene.Scene;
+import javafx.scene.canvas.*;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
-import javafx.scene.media.Media;
-import javafx.scene.media.MediaPlayer;
+import javafx.scene.media.*;
 import javafx.scene.paint.Color;
-import javafx.stage.FileChooser;
-import javafx.stage.Stage;
+import javafx.stage.*;
 import javafx.util.Duration;
 
 import java.io.File;
-import java.util.List;
+import java.util.*;
 import java.util.prefs.Preferences;
 
-/**
- * Simple Audio Player — bare-bones JavaFX desktop app.
- *
- * Features:
- *  - Add / remove audio files
- *  - Play, Pause, Stop, Next, Previous
- *  - Seek slider + timestamps
- *  - Volume control
- *  - Last-used folder remembered via Preferences
- */
 public class App extends Application {
 
-    // ── State ──────────────────────────────────────────────────────────────────
-    private final ObservableList<Track> tracks = FXCollections.observableArrayList();
-    private MediaPlayer   player;
-    private int           currentIndex = -1;
-    private boolean       seeking      = false;
+    // ── Repeat modes ──────────────────────────────────────────────────────────
+    enum Repeat { NONE, ONE, ALL }
 
-    // ── UI refs ────────────────────────────────────────────────────────────────
-    private ListView<Track> trackList;
-    private Label           nowPlayingLabel;
-    private Button          playBtn;
-    private Slider          seekSlider;
-    private Label           timeLabel;
-    private Slider          volSlider;
-    private Label           statusLabel;
+    // ── Data ──────────────────────────────────────────────────────────────────
+    private final ObservableList<Track>    library   = FXCollections.observableArrayList();
+    private final ObservableList<Playlist> playlists = FXCollections.observableArrayList();
+    private FilteredList<Track>            filtered;
 
-    // ── Preferences ───────────────────────────────────────────────────────────
+    // ── Player state ──────────────────────────────────────────────────────────
+    private MediaPlayer player;
+    private int         currentIndex = -1;
+    private List<Track> queue        = new ArrayList<>();
+    private boolean     seeking      = false;
+    private boolean     shuffle      = false;
+    private Repeat      repeat       = Repeat.NONE;
+
+    // ── Visualizer ────────────────────────────────────────────────────────────
+    private final float[] specMags = new float[32];
+    private final float[] smoothed = new float[32];
+    private Canvas        vizCanvas;
+
+    // ── UI refs ───────────────────────────────────────────────────────────────
+    private ListView<Track>    trackListView;
+    private ListView<Playlist> playlistView;
+    private Label              nowPlaying;
+    private Button             playBtn;
+    private Slider             seekSlider;
+    private Label              timeLabel;
+    private Slider             volSlider;
+    private Label              statusLabel;
+    private Button             shuffleBtn;
+    private Button             repeatBtn;
+    private TextField          searchField;
+
     private final Preferences prefs = Preferences.userNodeForPackage(App.class);
 
     // ══════════════════════════════════════════════════════════════════════════
 
     @Override
     public void start(Stage stage) {
-        stage.setTitle("Simple Audio Player");
+        Playlist allTracks = new Playlist("All Tracks");
+        playlists.add(allTracks);
+        filtered = new FilteredList<>(library, t -> true);
+
+        stage.setTitle("Audio Player");
         stage.setScene(buildScene(stage));
-        stage.setMinWidth(480);
-        stage.setMinHeight(400);
+        stage.setMinWidth(640);
+        stage.setMinHeight(500);
         stage.show();
+
+        startVisualizer();
     }
 
-    @Override
-    public void stop() {
+    @Override public void stop() {
         if (player != null) { player.stop(); player.dispose(); }
     }
 
-    // ── Scene ──────────────────────────────────────────────────────────────────
+    // ── Scene ─────────────────────────────────────────────────────────────────
 
     private Scene buildScene(Stage stage) {
 
-        // ── Track list ────────────────────────────────────────────────────────
-        trackList = new ListView<>(tracks);
-        trackList.setPlaceholder(new Label("No tracks — click Add Files"));
-        VBox.setVgrow(trackList, Priority.ALWAYS);
+        // ── Sidebar: playlists ────────────────────────────────────────────────
+        playlistView = new ListView<>(playlists);
+        playlistView.getSelectionModel().select(0);
+        playlistView.setPrefWidth(150);
+        VBox.setVgrow(playlistView, Priority.ALWAYS);
+        playlistView.getSelectionModel().selectedItemProperty()
+                .addListener((obs, o, n) -> { if (n != null) refreshTrackList(n); });
 
-        // Double-click to play
-        trackList.setOnMouseClicked(e -> {
-            if (e.getClickCount() == 2) playIndex(trackList.getSelectionModel().getSelectedIndex());
-        });
+        Button newPlBtn  = new Button("＋ New Playlist");
+        Button delPlBtn  = new Button("🗑 Delete");
+        newPlBtn.setMaxWidth(Double.MAX_VALUE);
+        delPlBtn.setMaxWidth(Double.MAX_VALUE);
+        newPlBtn.setOnAction(e -> createPlaylist());
+        delPlBtn.setOnAction(e -> deletePlaylist());
+
+        Label plLabel = new Label("PLAYLISTS");
+        plLabel.setStyle("-fx-font-size:10px;-fx-text-fill:#888;-fx-font-weight:bold;");
+
+        VBox sidebar = new VBox(6, plLabel, playlistView, newPlBtn, delPlBtn);
+        sidebar.setPadding(new Insets(8));
+        sidebar.setStyle("-fx-background-color:#f7f7f7;-fx-border-color:#ddd;-fx-border-width:0 1 0 0;");
 
         // ── Toolbar ───────────────────────────────────────────────────────────
-        Button addBtn = btn("Add Files");
-        Button remBtn = btn("Remove");
-        Button clrBtn = btn("Clear All");
-
+        Button addBtn = new Button("➕ Add Files");
+        Button remBtn = new Button("🗑 Remove");
         addBtn.setOnAction(e -> addFiles(stage));
         remBtn.setOnAction(e -> removeSelected());
-        clrBtn.setOnAction(e -> { stopPlayback(); tracks.clear(); currentIndex = -1; });
 
-        HBox toolbar = row(4, addBtn, remBtn, clrBtn);
+        searchField = new TextField();
+        searchField.setPromptText("🔍 Search...");
+        searchField.setPrefWidth(180);
+        searchField.textProperty().addListener((obs, o, n) -> applySearch(n));
+
+        shuffleBtn = new Button("⇄ Shuffle");
+        repeatBtn  = new Button("↻ Repeat: Off");
+        shuffleBtn.setOnAction(e -> toggleShuffle());
+        repeatBtn.setOnAction(e  -> cycleRepeat());
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        HBox toolbar = new HBox(8, addBtn, remBtn, spacer, searchField, shuffleBtn, repeatBtn);
         toolbar.setPadding(new Insets(8));
-        toolbar.setStyle("-fx-background-color: #f0f0f0; -fx-border-color: #ccc; -fx-border-width: 0 0 1 0;");
+        toolbar.setAlignment(Pos.CENTER_LEFT);
+        toolbar.setStyle("-fx-background-color:#f4f4f4;-fx-border-color:#ddd;-fx-border-width:0 0 1 0;");
+
+        // ── Track list ────────────────────────────────────────────────────────
+        trackListView = new ListView<>();
+        trackListView.setPlaceholder(new Label("No tracks — click Add Files"));
+        VBox.setVgrow(trackListView, Priority.ALWAYS);
+        trackListView.setOnMouseClicked(e -> {
+            if (e.getClickCount() == 2) playSelected();
+        });
+        trackListView.setContextMenu(buildContextMenu());
+        refreshTrackList(playlists.get(0));
+
+        // ── Visualizer ────────────────────────────────────────────────────────
+        vizCanvas = new Canvas(600, 60);
+        vizCanvas.widthProperty().bind(stage.widthProperty().subtract(166));
+        StackPane vizBox = new StackPane(vizCanvas);
+        vizBox.setStyle("-fx-background-color:#111;");
 
         // ── Now playing ───────────────────────────────────────────────────────
-        nowPlayingLabel = new Label("Nothing playing");
-        nowPlayingLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
-        nowPlayingLabel.setMaxWidth(Double.MAX_VALUE);
-        HBox.setHgrow(nowPlayingLabel, Priority.ALWAYS);
+        nowPlaying = new Label("Nothing playing");
+        nowPlaying.setStyle("-fx-font-weight:bold;-fx-font-size:13px;");
+        nowPlaying.setMaxWidth(Double.MAX_VALUE);
+        HBox npRow = new HBox(nowPlaying);
+        npRow.setPadding(new Insets(4, 10, 2, 10));
 
         // ── Seek ──────────────────────────────────────────────────────────────
         seekSlider = new Slider(0, 1, 0);
-        seekSlider.setMaxWidth(Double.MAX_VALUE);
         HBox.setHgrow(seekSlider, Priority.ALWAYS);
         seekSlider.setOnMousePressed(e  -> seeking = true);
         seekSlider.setOnMouseReleased(e -> {
             if (player != null) {
-                Duration total = player.getTotalDuration();
-                if (total != null && !total.isUnknown())
-                    player.seek(Duration.seconds(seekSlider.getValue() * total.toSeconds()));
+                Duration tot = player.getTotalDuration();
+                if (tot != null && !tot.isUnknown())
+                    player.seek(Duration.seconds(seekSlider.getValue() * tot.toSeconds()));
             }
             seeking = false;
         });
-
         timeLabel = new Label("0:00 / 0:00");
-        timeLabel.setStyle("-fx-font-family: monospace; -fx-font-size: 11px;");
+        timeLabel.setStyle("-fx-font-family:monospace;-fx-font-size:11px;");
         timeLabel.setMinWidth(90);
-        timeLabel.setAlignment(Pos.CENTER_RIGHT);
-
-        HBox seekRow = row(6, seekSlider, timeLabel);
-        seekRow.setPadding(new Insets(0, 8, 0, 8));
+        HBox seekRow = new HBox(6, seekSlider, timeLabel);
+        seekRow.setPadding(new Insets(0, 10, 0, 10));
+        seekRow.setAlignment(Pos.CENTER);
 
         // ── Transport ─────────────────────────────────────────────────────────
-        Button prevBtn = btn("⏮");
-        playBtn        = btn("▶");
-        Button stopBtn = btn("⏹");
-        Button nextBtn = btn("⏭");
-
+        Button prevBtn = new Button("⏮");
+        playBtn        = new Button("▶");
+        Button stopBtn = new Button("⏹");
+        Button nextBtn = new Button("⏭");
         prevBtn.setOnAction(e -> playIndex(currentIndex - 1));
         playBtn.setOnAction(e -> togglePlayPause());
         stopBtn.setOnAction(e -> stopPlayback());
         nextBtn.setOnAction(e -> playIndex(currentIndex + 1));
 
-        // ── Volume ────────────────────────────────────────────────────────────
-        Label volLbl = new Label("🔊");
+        Label volIcon = new Label("🔊");
         volSlider = new Slider(0, 1, 0.8);
-        volSlider.setMaxWidth(100);
-        volSlider.valueProperty().addListener((obs, o, n) -> {
-            if (player != null) player.setVolume(n.doubleValue());
+        volSlider.setMaxWidth(90);
+        volSlider.valueProperty().addListener((o, ov, nv) -> {
+            if (player != null) player.setVolume(nv.doubleValue());
         });
 
-        HBox controls = row(8, prevBtn, stopBtn, playBtn, nextBtn,
-                new Separator(javafx.geometry.Orientation.VERTICAL), volLbl, volSlider);
-        controls.setPadding(new Insets(8));
+        HBox controls = new HBox(8, prevBtn, stopBtn, playBtn, nextBtn,
+                new Separator(Orientation.VERTICAL), volIcon, volSlider);
+        controls.setPadding(new Insets(6, 10, 6, 10));
         controls.setAlignment(Pos.CENTER);
 
-        // ── Status ────────────────────────────────────────────────────────────
+        // ── Status bar ────────────────────────────────────────────────────────
         statusLabel = new Label("Ready");
-        statusLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #666;");
-        HBox statusBar = row(0, statusLabel);
-        statusBar.setPadding(new Insets(2, 8, 2, 8));
-        statusBar.setStyle("-fx-background-color: #f0f0f0; -fx-border-color: #ccc; -fx-border-width: 1 0 0 0;");
+        statusLabel.setStyle("-fx-font-size:11px;-fx-text-fill:#888;");
+        HBox statusBar = new HBox(statusLabel);
+        statusBar.setPadding(new Insets(3, 10, 3, 10));
+        statusBar.setStyle("-fx-background-color:#f4f4f4;-fx-border-color:#ddd;-fx-border-width:1 0 0 0;");
 
-        // ── Now playing row ───────────────────────────────────────────────────
-        HBox npRow = row(0, nowPlayingLabel);
-        npRow.setPadding(new Insets(6, 8, 2, 8));
+        // ── Right panel ───────────────────────────────────────────────────────
+        VBox rightPanel = new VBox(trackListView, vizBox, npRow, seekRow, controls, statusBar);
+        VBox.setVgrow(trackListView, Priority.ALWAYS);
 
-        // ── Root ──────────────────────────────────────────────────────────────
-        VBox root = new VBox(toolbar, trackList, npRow, seekRow, controls, statusBar);
-        root.setStyle("-fx-background-color: white;");
+        HBox body = new HBox(sidebar, rightPanel);
+        HBox.setHgrow(rightPanel, Priority.ALWAYS);
+        VBox.setVgrow(body, Priority.ALWAYS);
 
-        return new Scene(root, 520, 480);
+        VBox root = new VBox(toolbar, body);
+        root.setStyle("-fx-background-color:white;");
+        return new Scene(root, 760, 540);
     }
 
-    // ── File management ────────────────────────────────────────────────────────
+    // ── Context menu ──────────────────────────────────────────────────────────
+
+    private ContextMenu buildContextMenu() {
+        ContextMenu cm = new ContextMenu();
+        Menu addToMenu = new Menu("Add to Playlist ▶");
+        cm.getItems().add(addToMenu);
+        cm.setOnShowing(e -> {
+            addToMenu.getItems().clear();
+            for (Playlist pl : playlists) {
+                if (pl.getName().equals("All Tracks")) continue;
+                MenuItem mi = new MenuItem(pl.getName());
+                mi.setOnAction(ae -> {
+                    Track t = trackListView.getSelectionModel().getSelectedItem();
+                    if (t != null) { pl.add(t); setStatus("Added to \"" + pl.getName() + "\""); }
+                });
+                addToMenu.getItems().add(mi);
+            }
+            if (addToMenu.getItems().isEmpty())
+                addToMenu.getItems().add(new MenuItem("(create a playlist first)"));
+        });
+        return cm;
+    }
+
+    // ── Playlist management ───────────────────────────────────────────────────
+
+    private void createPlaylist() {
+        TextInputDialog dlg = new TextInputDialog("New Playlist");
+        dlg.setTitle("New Playlist");
+        dlg.setHeaderText(null);
+        dlg.setContentText("Name:");
+        dlg.showAndWait().map(String::trim).filter(s -> !s.isEmpty()).ifPresent(name -> {
+            Playlist pl = new Playlist(name);
+            playlists.add(pl);
+            playlistView.getSelectionModel().select(pl);
+        });
+    }
+
+    private void deletePlaylist() {
+        Playlist sel = playlistView.getSelectionModel().getSelectedItem();
+        if (sel == null || sel.getName().equals("All Tracks")) return;
+        playlists.remove(sel);
+        playlistView.getSelectionModel().select(0);
+    }
+
+    private void refreshTrackList(Playlist pl) {
+        if (pl.getName().equals("All Tracks")) {
+            trackListView.setItems(filtered);
+        } else {
+            FilteredList<Track> pf = new FilteredList<>(pl.getTracks(), t -> true);
+            applySearchTo(pf, searchField != null ? searchField.getText() : "");
+            trackListView.setItems(pf);
+        }
+    }
+
+    // ── File management ───────────────────────────────────────────────────────
 
     private void addFiles(Stage stage) {
         FileChooser fc = new FileChooser();
         fc.setTitle("Add Audio Files");
-        fc.getExtensionFilters().add(
-                new FileChooser.ExtensionFilter("Audio", "*.mp3","*.wav","*.aac","*.m4a","*.aiff","*.aif"));
-
-        // Restore last folder
-        String last = prefs.get("lastDir", System.getProperty("user.home"));
-        File dir = new File(last);
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter(
+                "Audio Files", "*.mp3","*.wav","*.aac","*.m4a","*.aiff","*.aif"));
+        String lastDir = prefs.get("lastDir", System.getProperty("user.home"));
+        File dir = new File(lastDir);
         if (dir.exists()) fc.setInitialDirectory(dir);
 
         List<File> files = fc.showOpenMultipleDialog(stage);
-        if (files == null || files.isEmpty()) return;
-
-        // Save last folder
+        if (files == null) return;
         prefs.put("lastDir", files.get(0).getParent());
 
+        int added = 0;
         for (File f : files) {
-            boolean dup = tracks.stream().anyMatch(t -> t.getFile().equals(f));
-            if (!dup) tracks.add(new Track(f));
+            if (library.stream().noneMatch(t -> t.getFile().equals(f))) {
+                Track t = new Track(f);
+                library.add(t);
+                playlists.get(0).add(t);
+                added++;
+            }
         }
-        setStatus("Added " + files.size() + " file(s). Total: " + tracks.size());
+        setStatus(added + " file(s) added. Total: " + library.size());
     }
 
     private void removeSelected() {
-        int idx = trackList.getSelectionModel().getSelectedIndex();
-        if (idx < 0) return;
-        if (idx == currentIndex) stopPlayback();
-        tracks.remove(idx);
-        // Fix currentIndex after removal
-        if (idx < currentIndex) currentIndex--;
-        else if (idx == currentIndex) currentIndex = -1;
+        Playlist pl  = playlistView.getSelectionModel().getSelectedItem();
+        Track    sel = trackListView.getSelectionModel().getSelectedItem();
+        if (sel == null || pl == null) return;
+        if (pl.getName().equals("All Tracks")) {
+            library.remove(sel);
+            playlists.forEach(p -> p.remove(sel));
+        } else {
+            pl.remove(sel);
+        }
+        if (sel.equals(currentTrack())) stopPlayback();
     }
 
-    // ── Playback ───────────────────────────────────────────────────────────────
+    // ── Search ────────────────────────────────────────────────────────────────
+
+    private void applySearch(String query) {
+        Playlist pl = playlistView.getSelectionModel().getSelectedItem();
+        if (pl == null) return;
+        if (trackListView.getItems() instanceof FilteredList<?> fl) {
+            applySearchTo((FilteredList<Track>) fl, query);
+        }
+    }
+
+    private void applySearchTo(FilteredList<Track> list, String query) {
+        if (query == null || query.isBlank()) {
+            list.setPredicate(t -> true);
+        } else {
+            String q = query.toLowerCase();
+            list.setPredicate(t -> t.getName().toLowerCase().contains(q));
+        }
+    }
+
+    // ── Shuffle / Repeat ──────────────────────────────────────────────────────
+
+    private void toggleShuffle() {
+        shuffle = !shuffle;
+        shuffleBtn.setStyle(shuffle ? "-fx-background-color:#d0eaff;" : "");
+        shuffleBtn.setText(shuffle ? "⇄ Shuffle: On" : "⇄ Shuffle");
+        rebuildQueue();
+        setStatus(shuffle ? "Shuffle on" : "Shuffle off");
+    }
+
+    private void cycleRepeat() {
+        repeat = switch (repeat) {
+            case NONE -> Repeat.ALL;
+            case ALL  -> Repeat.ONE;
+            case ONE  -> Repeat.NONE;
+        };
+        String label = switch (repeat) {
+            case NONE -> "↻ Repeat: Off";
+            case ALL  -> "↻ Repeat: All";
+            case ONE  -> "↺ Repeat: One";
+        };
+        repeatBtn.setText(label);
+        repeatBtn.setStyle(repeat != Repeat.NONE ? "-fx-background-color:#d0eaff;" : "");
+    }
+
+    private void rebuildQueue() {
+        queue = new ArrayList<>(trackListView.getItems());
+        if (shuffle) Collections.shuffle(queue);
+        Track cur = currentTrack();
+        currentIndex = cur != null ? queue.indexOf(cur) : -1;
+    }
+
+    // ── Playback ──────────────────────────────────────────────────────────────
+
+    private void playSelected() {
+        rebuildQueue();
+        Track sel = trackListView.getSelectionModel().getSelectedItem();
+        int idx   = sel != null ? queue.indexOf(sel) : 0;
+        playIndex(idx >= 0 ? idx : 0);
+    }
 
     private void playIndex(int idx) {
-        if (tracks.isEmpty()) return;
-        // Clamp
-        if (idx < 0) idx = tracks.size() - 1;
-        if (idx >= tracks.size()) idx = 0;
+        if (queue.isEmpty()) rebuildQueue();
+        if (queue.isEmpty()) return;
+
+        if (idx < 0 || idx >= queue.size()) {
+            if (repeat == Repeat.ALL) idx = idx < 0 ? queue.size() - 1 : 0;
+            else { stopPlayback(); return; }
+        }
 
         currentIndex = idx;
-        trackList.getSelectionModel().select(idx);
-        trackList.scrollTo(idx);
+        Track track  = queue.get(idx);
+        trackListView.getSelectionModel().select(track);
+        trackListView.scrollTo(track);
 
-        Track track = tracks.get(idx);
-
-        // Dispose old player
-        if (player != null) { player.stop(); player.dispose(); player = null; }
+        if (player != null) { player.stop(); player.dispose(); }
 
         try {
             Media media = new Media(track.getFile().toURI().toString());
             player = new MediaPlayer(media);
             player.setVolume(volSlider.getValue());
 
-            // Ready
-            player.setOnReady(() -> {
-                Duration total = player.getTotalDuration();
-                Platform.runLater(() -> updateTimeLabel(Duration.ZERO, total));
-            });
+            player.setOnReady(() -> Platform.runLater(() ->
+                    updateTime(Duration.ZERO, player.getTotalDuration())));
 
-            // Time updates
-            player.currentTimeProperty().addListener((ChangeListener<Duration>) (obs, o, n) -> {
+            player.currentTimeProperty().addListener((obs, o, n) -> {
                 if (!seeking) Platform.runLater(() -> {
-                    Duration total = player.getTotalDuration();
-                    if (total != null && !total.isUnknown() && total.toSeconds() > 0)
-                        seekSlider.setValue(n.toSeconds() / total.toSeconds());
-                    updateTimeLabel(n, total);
+                    Duration tot = player.getTotalDuration();
+                    if (tot != null && !tot.isUnknown() && tot.toSeconds() > 0)
+                        seekSlider.setValue(n.toSeconds() / tot.toSeconds());
+                    updateTime(n, tot);
                 });
             });
 
-            // End → next
-            player.setOnEndOfMedia(() -> Platform.runLater(() -> playIndex(currentIndex + 1)));
+            player.setAudioSpectrumNumBands(32);
+            player.setAudioSpectrumInterval(0.05);
+            player.setAudioSpectrumListener((ts, dur, mags, phases) ->
+                    System.arraycopy(mags, 0, specMags, 0, 32));
 
-            // Error
-            player.setOnError(() ->
-                    Platform.runLater(() -> setStatus("Error: " + player.getError().getMessage())));
+            player.setOnEndOfMedia(() -> Platform.runLater(() -> {
+                if (repeat == Repeat.ONE) { player.seek(Duration.ZERO); player.play(); }
+                else playIndex(currentIndex + 1);
+            }));
+
+            player.setOnError(() -> Platform.runLater(() ->
+                    setStatus("Error: " + player.getError().getMessage())));
 
             player.play();
-            nowPlayingLabel.setText("▶  " + track.getName());
+            nowPlaying.setText("▶  " + track.getName());
             playBtn.setText("⏸");
             setStatus("Playing: " + track.getName());
 
@@ -256,39 +423,82 @@ public class App extends Application {
     }
 
     private void togglePlayPause() {
-        if (player == null) {
-            // Nothing loaded — play first or selected track
-            int sel = trackList.getSelectionModel().getSelectedIndex();
-            playIndex(sel >= 0 ? sel : 0);
-            return;
-        }
-        MediaPlayer.Status status = player.getStatus();
-        if (status == MediaPlayer.Status.PLAYING) {
+        if (player == null) { playSelected(); return; }
+        if (player.getStatus() == MediaPlayer.Status.PLAYING) {
             player.pause();
             playBtn.setText("▶");
-            nowPlayingLabel.setText("⏸  " + tracks.get(currentIndex).getName());
             setStatus("Paused");
         } else {
             player.play();
             playBtn.setText("⏸");
-            nowPlayingLabel.setText("▶  " + tracks.get(currentIndex).getName());
-            setStatus("Playing: " + tracks.get(currentIndex).getName());
+            if (currentTrack() != null) setStatus("Playing: " + currentTrack().getName());
         }
     }
 
     private void stopPlayback() {
-        if (player != null) { player.stop(); }
+        if (player != null) player.stop();
         seekSlider.setValue(0);
         timeLabel.setText("0:00 / 0:00");
         playBtn.setText("▶");
-        nowPlayingLabel.setText("Nothing playing");
+        nowPlaying.setText("Nothing playing");
         setStatus("Stopped");
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
+    private Track currentTrack() {
+        if (currentIndex < 0 || currentIndex >= queue.size()) return null;
+        return queue.get(currentIndex);
+    }
 
-    private void updateTimeLabel(Duration current, Duration total) {
-        timeLabel.setText(fmt(current) + " / " + fmt(total));
+    // ── Visualizer ────────────────────────────────────────────────────────────
+
+    private void startVisualizer() {
+        new AnimationTimer() {
+            @Override public void handle(long now) { drawVisualizer(); }
+        }.start();
+    }
+
+    private void drawVisualizer() {
+        GraphicsContext gc = vizCanvas.getGraphicsContext2D();
+        double w = vizCanvas.getWidth();
+        double h = vizCanvas.getHeight();
+
+        gc.setFill(Color.web("#111"));
+        gc.fillRect(0, 0, w, h);
+
+        boolean playing = player != null &&
+                player.getStatus() == MediaPlayer.Status.PLAYING;
+
+        if (!playing) {
+            // Flat line when idle
+            gc.setStroke(Color.web("#333"));
+            gc.setLineWidth(1.5);
+            gc.strokeLine(0, h / 2, w, h / 2);
+            return;
+        }
+
+        int    bands = 32;
+        double gap   = 3;
+        double barW  = (w - gap * (bands + 1)) / bands;
+
+        for (int i = 0; i < bands; i++) {
+            float raw = Math.max(0f, (specMags[i] + 60f) / 60f);
+            smoothed[i] = smoothed[i] * 0.7f + raw * 0.3f;
+
+            double barH = Math.max(2, smoothed[i] * (h - 4));
+            double x    = gap + i * (barW + gap);
+            double y    = h - barH;
+
+            // Green → yellow → red based on height
+            Color c = Color.hsb((1.0 - smoothed[i]) * 120, 0.9, 0.85);
+            gc.setFill(c);
+            gc.fillRoundRect(x, y, barW, barH, 3, 3);
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private void updateTime(Duration cur, Duration tot) {
+        timeLabel.setText(fmt(cur) + " / " + fmt(tot));
     }
 
     private static String fmt(Duration d) {
@@ -298,18 +508,6 @@ public class App extends Application {
     }
 
     private void setStatus(String msg) { statusLabel.setText(msg); }
-
-    private static Button btn(String text) {
-        Button b = new Button(text);
-        b.setFocusTraversable(false);
-        return b;
-    }
-
-    private static HBox row(double spacing, javafx.scene.Node... nodes) {
-        HBox box = new HBox(spacing, nodes);
-        box.setAlignment(Pos.CENTER_LEFT);
-        return box;
-    }
 
     public static void main(String[] args) { launch(args); }
 }
