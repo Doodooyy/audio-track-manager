@@ -9,7 +9,9 @@ git clone https://github.com/Doodooyy/audio-track-manager
 
 # Usage
 - MacOS/Linux
-    chmod +x run.sh && ./run.sh
+
+  ```chmod +x run.sh && ./run.sh```
 - Windows
-    //
+
+  ```run.bat```
     
