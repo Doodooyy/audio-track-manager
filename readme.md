@@ -1,6 +1,6 @@
 # Audio track player and manager
 
-# Prerequisite
+# Prerequisites
 Apache Maven 3.9.14
 Java 17.0.x
 
