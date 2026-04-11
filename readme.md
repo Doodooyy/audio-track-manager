@@ -14,5 +14,5 @@ git clone https://github.com/Doodooyy/audio-track-manager
   ```chmod +x run.sh && ./run.sh```
 - Windows
 
-  ```\.run.bat```
+  ```.\run.bat```
     
