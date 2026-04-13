@@ -71,7 +71,7 @@ public class App extends Application {
         stage.setMinHeight(500);
         stage.show();
 
-        startVisualizer();
+        // startVisualizer();
     }
 
     @Override public void stop() {
@@ -142,7 +142,7 @@ public class App extends Application {
         vizCanvas = new Canvas(600, 60);
         vizCanvas.widthProperty().bind(stage.widthProperty().subtract(166));
         StackPane vizBox = new StackPane(vizCanvas);
-        vizBox.setStyle("-fx-background-color:#111;");
+        // vizBox.setStyle("-fx-background-color:#111;");
 
         // ── Now playing ───────────────────────────────────────────────────────
         nowPlaying = new Label("Nothing playing");
@@ -449,51 +449,51 @@ public class App extends Application {
         return queue.get(currentIndex);
     }
 
-    // ── Visualizer ────────────────────────────────────────────────────────────
+    // // ── Visualizer ────────────────────────────────────────────────────────────
 
-    private void startVisualizer() {
-        new AnimationTimer() {
-            @Override public void handle(long now) { drawVisualizer(); }
-        }.start();
-    }
+    // private void startVisualizer() {
+    //     new AnimationTimer() {
+    //         @Override public void handle(long now) { drawVisualizer(); }
+    //     }.start();
+    // }
 
-    private void drawVisualizer() {
-        GraphicsContext gc = vizCanvas.getGraphicsContext2D();
-        double w = vizCanvas.getWidth();
-        double h = vizCanvas.getHeight();
+    // private void drawVisualizer() {
+    //     GraphicsContext gc = vizCanvas.getGraphicsContext2D();
+    //     double w = vizCanvas.getWidth();
+    //     double h = vizCanvas.getHeight();
 
-        gc.setFill(Color.web("#111"));
-        gc.fillRect(0, 0, w, h);
+    //     gc.setFill(Color.web("#111"));
+    //     gc.fillRect(0, 0, w, h);
 
-        boolean playing = player != null &&
-                player.getStatus() == MediaPlayer.Status.PLAYING;
+    //     boolean playing = player != null &&
+    //             player.getStatus() == MediaPlayer.Status.PLAYING;
 
-        if (!playing) {
-            // Flat line when idle
-            gc.setStroke(Color.web("#333"));
-            gc.setLineWidth(1.5);
-            gc.strokeLine(0, h / 2, w, h / 2);
-            return;
-        }
+    //     if (!playing) {
+    //         // Flat line when idle
+    //         gc.setStroke(Color.web("#333"));
+    //         gc.setLineWidth(1.5);
+    //         gc.strokeLine(0, h / 2, w, h / 2);
+    //         return;
+    //     }
 
-        int    bands = 32;
-        double gap   = 3;
-        double barW  = (w - gap * (bands + 1)) / bands;
+    //     int    bands = 32;
+    //     double gap   = 3;
+    //     double barW  = (w - gap * (bands + 1)) / bands;
 
-        for (int i = 0; i < bands; i++) {
-            float raw = Math.max(0f, (specMags[i] + 60f) / 60f);
-            smoothed[i] = smoothed[i] * 0.7f + raw * 0.3f;
+    //     for (int i = 0; i < bands; i++) {
+    //         float raw = Math.max(0f, (specMags[i] + 60f) / 60f);
+    //         smoothed[i] = smoothed[i] * 0.7f + raw * 0.3f;
 
-            double barH = Math.max(2, smoothed[i] * (h - 4));
-            double x    = gap + i * (barW + gap);
-            double y    = h - barH;
+    //         double barH = Math.max(2, smoothed[i] * (h - 4));
+    //         double x    = gap + i * (barW + gap);
+    //         double y    = h - barH;
 
-            // Green → yellow → red based on height
-            Color c = Color.hsb((1.0 - smoothed[i]) * 120, 0.9, 0.85);
-            gc.setFill(c);
-            gc.fillRoundRect(x, y, barW, barH, 3, 3);
-        }
-    }
+    //         // Green → yellow → red based on height
+    //         Color c = Color.hsb((1.0 - smoothed[i]) * 120, 0.9, 0.85);
+    //         gc.setFill(c);
+    //         gc.fillRoundRect(x, y, barW, barH, 3, 3);
+    //     }
+    // }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
